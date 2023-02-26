@@ -1,0 +1,104 @@
+#!/tools/batonroot/rodin/engkits/lnx64/python-3.8.3_designAnalysis/bin/python
+
+#===============================================================================#
+# python script to read the data from design_analysis.rpt & vivado.log files and update that in confluence page.
+#===============================================================================#
+
+pythonPath = '/tools/batonroot/rodin/engkits/lnx64/python-3.8.3_designAnalysis/bin/python'
+# ======== check python and module availability before executing the code & import modules if they exist ======== #
+import os, sys
+if not os.path.exists(pythonPath):
+  sys.exit(f'Error: Python path {pythonPath} does not exists. Contact IT to get it installed & try again.')
+modules = ['pathlib', 'datetime', 'argparse', 're', 'atexit', 'json', 'getpass', 'itertools']
+notFound = 0
+for module in modules:
+  try:
+    exec(f'import {module}')
+  except:
+    notFound += 1
+    print(f'Error: Module {module} not found, but can be installed with:\n{pythonPath} -m pip install {module}\nOr contact IT to get it installed & try again')
+try:
+  from atlassian import Confluence
+except:
+  notFound += 1
+  print(f'Error: Module atlassian not found, but can be installed with:\n{pythonPath} -m pip install atlassian-python-api\nOr contact IT to get it installed & try again')
+try:
+  import interaction
+except:
+  print(f'Error: Can\'t find interaction.py file. You must keep designAnalysis.py, interaction.py & requiredFiles.json files in one directory.')
+if notFound:
+  sys.exit()
+# =============================================================================================================== #
+
+def main():
+  today = datetime.datetime.now()
+  pageAction = 'create'
+  pageID = None
+  dataOfDesigns = []
+  parser = argparse.ArgumentParser(description = "get required input arguments from the user")
+  parser.add_argument("-p", "--designRunPaths", help = "directory path/paths where all the datafiles of design run are available (maximum 2 paths separated by ' ')")
+  parser.add_argument("-n", "--designNames", help = "Name of the design/designs (maximum 2 designs separated by ' ')")
+  parser.add_argument("-i", "--parentPageID", type = int, default = 311208655, help = "page id of the parent confluence page inside which the current confluence page exists or user want to create new confluence page (default: %(default)s)")
+  parser.add_argument("-c", "--compareWith", type = int, help = "page id of the confluence page with which user want to compare the latest data")
+  parser.add_argument("-o", "--overwrite", type = int, help = "page id of the confluence page, which user wants to overwrite")
+  parser.add_argument("--dabusr", help = "run script through 'dabusr' account.", action = "store_true")
+  args = parser.parse_args()
+  # ======== use of -p/--designRunPaths argument ======== #
+  if args.designRunPaths is None:
+    sys.exit("Error: Design run path is not provided!!!")
+  else:
+    designRunPaths = list((args.designRunPaths).split(' '))
+    if len(designRunPaths) > 2:
+      sys.exit("Error: You can only pass maximum 2 designs run paths, currently %d are passed!!!"%(len(designRunPaths)))
+  for runPath in designRunPaths:
+    if not os.path.exists(runPath):
+      sys.exit("Error: Top level directory or file %s doesn't exists!!!"%(runPath))
+  # ===================================================== #
+  # ======== use of -n/--designNames argument ======== #
+  designNames = list((args.designNames).split(' '))
+  if len(designRunPaths) != len(designNames):
+    sys.exit("Error: the number of design run paths must be equal to the number of design names!!!")
+  pageTitle = f'{" vs ".join(designNames)} Analysis {today.strftime("%b %d, %Y")}'
+  # ================================================== #
+  notAllData = False
+  for runPath, designName in zip(designRunPaths, designNames):
+    designRunPath = pathlib.Path(runPath)
+    filesNotFound = []					# list of unavailable files required to generate page with all data
+    # if designRunPath is an existing directory path then read data from files available in designRunPath directory & create a *.json file from that data
+    if designRunPath.is_dir():
+      tables = interaction.getAllData(directory=runPath)
+      tables["Design"] = designName
+      # print(json.dumps(tables, indent = 2))
+      jsonFile = f'{os.getcwd()}/{designName}-{today.strftime("%Y%m%d%H%M%S")}.json'
+      interaction.writeDataToJSON(jsonFile, tables)
+    elif designRunPath.suffix == '.json':
+      tables = interaction.getJSONdata(runPath)
+    else:
+      sys.exit(f'Path {runPath} is not valid!!!')
+    dataOfDesigns.append(tables)
+  dataDesign1, dataDesign2 = dataOfDesigns if len(dataOfDesigns) == 2 else [dataOfDesigns[0], None]
+  parentPageID = args.parentPageID
+  # ======== use of --dabusr argument ======== #
+  confluence = interaction.dabusrConnect() if args.dabusr else interaction.connect()    # login to 'https://confluence.xilinx.com/' by 'dabusr' account if --dabusr is passed else login by user's account
+  # ========================================== #
+  # ======== use of -o/--overwrite argument ======== #
+  if args.overwrite:
+    pageAction = 'overwrite'
+    pageID = args.overwrite
+    parentPageID = None
+    pageTitle = interaction.get_page_title(pageID, confluence)
+  # ================================================ #
+  comparativePageID = None if len(designNames) == 2 else args.compareWith
+  if pageAction == 'create':
+    pageTitle = interaction.validatePageTitle(confluence=confluence, parentPageID=parentPageID, pageTitle=pageTitle)
+  pageBody = interaction.pageData2html(confluence=confluence, dataDesign1=dataDesign1, dataDesign2=dataDesign2, comparativePageID=comparativePageID, pageAction=pageAction)
+  interaction.writeFile("sample.html", pageBody)
+  pageDetails = interaction.updateConfluence(pageTitle=pageTitle, body=pageBody, confluence=confluence, pageID=pageID, parentPageID=parentPageID, pageAction=pageAction)
+  pageURL = f'https://confluence.xilinx.com{pageDetails["_links"]["webui"]}'
+  print("Page URL:\n", pageURL)
+  print("Job Done _/")
+# ==== End of main() function ==== #
+
+if __name__ == "__main__":
+  sys.exit(main())
+  
