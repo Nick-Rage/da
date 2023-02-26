@@ -1,0 +1,471 @@
+#!/tools/batonroot/rodin/engkits/lnx64/python-3.8.3_designAnalysis/bin/python
+
+#===============================================================================#
+# python script to read the data from design_analysis.rpt & vivado.log files and update that in confluence page.
+#===============================================================================#
+
+pythonPath = '/tools/batonroot/rodin/engkits/lnx64/python-3.8.3_designAnalysis/bin/python'
+# check python and module availability before executing the code & import modules if they exist
+import os, sys
+if not os.path.exists(pythonPath):
+  sys.exit(f'Error: Python path {pythonPath} does not exists. Contact IT to get it installed & try again')
+modules = ['pathlib', 'datetime', 'argparse', 're', 'atexit', 'json', 'getpass']
+notFound = 0
+for module in modules:
+  try:
+    exec(f'import {module}')
+  except:
+    notFound += 1
+    print(f'Error: Module {module} not found, but can be installed with:\n{pythonPath} -m pip install {module}\nOr contact IT to get it installed & try again')
+try:
+  from atlassian import Confluence
+except:
+  notFound += 1
+  print(f'Error: Module atlassian not found, but can be installed with:\n{pythonPath} -m pip install atlassian-python-api\nOr contact IT to get it installed & try again')
+if notFound:
+  sys.exit()
+
+# connect to confluence page
+def connect():
+  url = "https://confluence.xilinx.com/"
+  verify = "/etc/pki/tls/certs/ca-bundle.crt"
+  for i in range(3): # accept maximum 3 trials
+    confluence = Confluence(url=url, username=os.getlogin(), password=getpass.getpass(prompt = "Password: "), verify_ssl=verify)
+    try:
+      softwareSpaceTitle = get_page_title(pageID=2064481, confluence=confluence)		# test whether confluence login is successful or not
+      break
+    except:
+      if i == 2:
+        sys.exit(f'Error: Too many unsuccessful attempts.\nUnable to login to confluence. This may be due to wrong password or you are unable to access https://confluence.xilinx.com/display/XSW/Portal page.')
+      print("Warning: Incorrect password!!!, Try again.")
+  return confluence
+
+# connect to confluence page through dabusr account
+def dabusrConnect():
+  url = "https://confluence.xilinx.com/"
+  verify = "/etc/pki/tls/certs/ca-bundle.crt"
+  confluence = Confluence(url=url, username='dabusr', password='!GoogleProfiler123', verify_ssl=verify)
+  try:
+    softwareSpaceTitle = get_page_title(pageID=2064481, confluence=confluence)          # test whether confluence login is successful or not
+  except:
+    sys.exit(f'Error: unable to login to confluence. This may be due to wrong password or dabusr is unable to access https://confluence.xilinx.com/display/XSW/Portal page.')
+  return confluence
+
+# create/overwrite/append the confluence page & return the page details
+def updateConfluence(pageTitle, body, confluence, pageID=None, parentPageID=None, pageAction='create'):
+  # ======== get the space, where page with id=parentPageID or id=pageID exists ======== #
+  try:
+    space = confluence.get_page_space(pageID) if pageID is not None else confluence.get_page_space(parentPageID)
+  except:
+    if pageAction == "create":
+      sys.exit('Error: parentPageID is required to create a new page.')
+    else:
+      sys.exit("Error: any of the page's (parent page or the page you want to edit) id is required.")
+  # ==================================================================================== #
+  if pageAction == "create":
+    try:
+      confluence.create_page(space=space, title=pageTitle, body=body, parent_id=parentPageID)
+    except:
+      print(f'Warning: Either page with title {pageTitle} already exists or something is wrong in HTML code of body you want to upload.\nUser Action: Try to overwrite the page in case of page already exists.')
+  try:
+    if pageID is None:
+      pageID = confluence.get_page_id(space, pageTitle)					# get the page id of the titled page
+  except:
+    pass
+  try:
+    if pageAction == "overwrite":
+      confluence.update_page(page_id=pageID, title=pageTitle, body=body, parent_id=parentPageID)
+    elif pageAction == "append":
+      confluence.append_page(page_id=pageID, title=pageTitle, append_body=body, parent_id=parentPageID)
+    elif pageAction == "prepend":
+      confluence.prepend_page(page_id=pageID, title=pageTitle, prepend_body=body, parent_id=parentPageID)
+  except:
+    print(f'Warning: Page with title {pageTitle} does not exist.\nAction taken: Creating new page with title {pageTitle}.')
+    try:
+      confluence.create_page(space=space, title=pageTitle, body=body, parent_id=parentPageID)
+    except:
+      print(f'Warning: Either page with title {pageTitle} already exists or something is wrong in HTML code of body you want to upload.\nUser Action: Try to overwrite the page in case of page already exists.')
+    pageID = confluence.get_page_id(space, pageTitle)                  			# get the page id of the titled page
+  return confluence.get_page_by_id(pageID)
+
+# return the title of the confluence page of page_id=pageID
+def get_page_title(pageID, confluence):
+    pageProperties = confluence.get_page_by_id(pageID)
+    return pageProperties['title']
+
+# validate the page title, change the page title on user request if page with title already exists
+def validatePageTitle(confluence, parentPageID, pageTitle):
+  tempTitle = pageTitle
+  num = 1
+  childPagesList = confluence.get_child_title_list(parentPageID) 			# get list of titles of all the child pages of page with id=parentPageID
+  if tempTitle in childPagesList: 							# if page with title already exists under page with id=parentPageID
+    print('Similar confluence pages with following titles already exists:')
+  while tempTitle in childPagesList:
+    print(tempTitle)
+    num += 1
+    tempTitle = f'{pageTitle} #{num}'							# add numberat the end of title
+  if num > 1:
+    for i in range(3):
+      choice = input('Do you want to create a new page?\n')				# if page with title=<pageTitle> already exists, then ask to create new page title
+      if choice in ['y', 'Y', 'yes', 'Yes', 'YES']:
+        break
+      elif choice in ['n', 'N', 'no', 'No', 'NO']:
+        sys.exit()
+      else:
+        if i == 2:
+          sys.exit("Too many unsuccessful attempts.")
+        print('Warning: Invalid choice!!!\tTry again.')
+  return tempTitle
+
+def validateDictKey(key, dictionary):
+  tempKey = key
+  num = 1
+  while tempKey in dictionary:
+    num += 1
+    tempKey = f'{key} #{num}'
+  return tempKey
+
+# return html code of individual table from dictionary of table data
+def dict2table(tableDesign1, nameDesign1, tableDesign2={}, nameDesign2=None):
+  indent = '  '
+  powOf10 = {"F": 15, "T": 12, "G": 9, "M": 6, "K": 3, "m": -3, "u": -6, "n": -9, "p": -12}
+  tableData = ''
+  if (not tableDesign1) or ("Warning" in tableDesign1):
+    tableData += f'\n{indent*12}<pre style="color:orange;">\n{tableDesign1["Warning"] if "Warning" in tableDesign1 else "!!! Data not available"} {f"for {nameDesign1} " if nameDesign2 else ""}!!!\n{indent*12}</pre>'
+    tableDesign1 = {}
+  if ((not tableDesign2) and nameDesign2) or ("Warning" in tableDesign2):
+    tableData += f'\n{indent*12}<pre style="color:orange;">\n{tableDesign2["Warning"] if "Warning" in tableDesign2 else "!!! Data not available"} for {nameDesign2} !!!\n{indent*12}</pre>'
+    tableDesign2 = {}
+  if tableDesign1 or tableDesign2:
+    colHeads1 = tableDesign1["colHeads"].copy() if tableDesign1 else [] # column headings in table 1
+    colHeads2 = tableDesign2["colHeads"].copy() if tableDesign2 else [] # column headings in table 2
+    # columnHeadings = list(set(colHeads1) | set(colHeads2)) # Union of 2 lists without repetition (order not maintained)
+    columnHeadings = []
+    for colHead in colHeads1 + colHeads2:
+      if colHead not in columnHeadings: columnHeadings.append(colHead) # Union of 2 lists without repetition with maintained order same as in colHeads1 + colHeads2
+    if tableDesign1: del tableDesign1["colHeads"]
+    if tableDesign2: del tableDesign2["colHeads"]
+    """
+      delete "colHeads" data from tableDesign1 & tableDesign2 as these have list type data, but the code ahead is to access other keys data in tableDesign1 & tableDesign2, is to access dictionary data which may produce error for "colHeads" key
+    """
+    colHeadsSpan3 = ["Used", "Available", "Util%", "Wns(ns)", "Wire length(*1e7)", "Runtime(mins)", "Requirement", "Thershold", "Actual", "Number of Violations", "Fanout", "Count", "# nets"]
+    tableData += f'\n{indent*12}<table style ="width:100%">\n{indent*13}<tr style="width:50%;word-wrap: break-word">\n{indent*14}<th style="word-break:break-all">{columnHeadings[0]}</th>' # 1st column for row headings is of single colspan
+    for columnHeading in columnHeadings[1:]:
+      if nameDesign2: # nameDesign2 != None if tableDesign2 != None, but tableDesign2 may be {} empty in some cases, so used condition in nameDesign2
+        tableData += f'\n{indent*14}<th colspan="3">{columnHeading}</th>' if columnHeading in colHeadsSpan3 else f'\n{indent*14}<th colspan="2">{columnHeading}</th>'
+      else:
+        tableData += f'\n{indent*14}<th>{columnHeading}</th>'
+    tableData += f'\n{indent*13}</tr>'
+    if nameDesign2: # table 2 is there
+      tableData += f'\n{indent*13}<tr>\n<th>&nbsp;</th>'
+      for columnHeading in columnHeadings[1:]:
+        tableData += f'\n{indent*14}<th style="word-wrap: break-word">{nameDesign1.replace("_"," ")}</th>\n{indent*14}<th style="word-wrap: break-word">{nameDesign2.replace("_"," ")}</th>'
+        if columnHeading in colHeadsSpan3:
+          tableData += f'\n{indent*14}<th>Delta</th>'
+      tableData += f'\n{indent*13}</tr>'
+    rowHeads1 = list(tableDesign1.keys()) if tableDesign1 else [] # row headings in table 1
+    rowHeads2 = list(tableDesign2.keys()) if tableDesign2 else [] # row headings in table 2
+    rowHeadings = []
+    for rowHead in rowHeads1 + rowHeads2:
+      if rowHead not in rowHeadings: rowHeadings.append(
+        rowHead)  # get all the possible row headings as per data of both the tables
+    for rowHeading in rowHeadings:
+      tableData += f'\n{indent * 13}<tr>\n{indent * 14}<td style="background-color:#EEEEF0;">{re.sub(" #[0-9]+$", "", rowHeading)}</td>'  # remove " #[0-9]+" pattern like " #43" form the end of rowHeading
+      if rowHeading not in rowHeads1:
+        tableDesign1[rowHeading] = {columnHeading: "-" for columnHeading in columnHeadings}
+      if (rowHeading not in rowHeads2) and nameDesign2:  # if table 2 is there but no data for row heading=<rowHeading>
+        tableDesign2[rowHeading] = {columnHeading: "-" for columnHeading in
+                                    columnHeadings}  # add empty row in table 2 of row heading=<rowHeading>
+      for columnHeading in columnHeadings[1:]:
+        tableData += f'\n{indent * 14}<td>{tableDesign1[rowHeading][columnHeading]}</td>' if columnHeading in \
+                                                                                             tableDesign1[
+                                                                                               rowHeading] else f'\n{indent * 14}<td>&minus;</td>'
+        if nameDesign2:  # table 2 is there
+          tableData += f'\n{indent * 14}<td>{tableDesign2[rowHeading][columnHeading]}</td>' if columnHeading in \
+                                                                                               tableDesign2[
+                                                                                                 rowHeading] else f'\n{indent * 14}<td>&minus;</td>'
+          if columnHeading in colHeadsSpan3:
+            try:
+              value1 = float(re.search("[0-9.]+", tableDesign1[rowHeading][columnHeading]).group())
+              value2 = float(re.search("[0-9.]+", tableDesign2[rowHeading][columnHeading]).group())
+              for key in powOf10:
+                if re.search(f'.+{key}.+', tableDesign1[rowHeading][columnHeading]): value1 *= pow(10, powOf10[key])
+                if re.search(f'.+{key}.+', tableDesign2[rowHeading][columnHeading]): value2 *= pow(10, powOf10[key])
+              delta = value2 - value1 if columnHeading == "Util%" else ((value2 / value1) - 1) * 100
+              tableData += f'\n{indent * 14}<td style=\"background-color:#{"D5FFE5" if delta < 0 else "FFC0D0"};\">{"%.2f" % delta} %</td>' if delta else f'\n{indent * 14}<td>{"%.2f" % delta} %</td>'  # set some background color to Delta cell based on delta value
+            except:
+              tableData += f'\n{indent * 14}<td>&minus;</td>'
+      tableData += f'\n{indent * 13}</tr>'
+    tableData += f'\n{indent * 12}</table>'
+    return tableData
+
+  # return html code of confluence page by reading pageData dictionary
+  def pageData2html(confluence, dataDesign1, dataDesign2=None, comparativePageID=None, pageAction='create'):
+    indent = "  "
+    nameDesign1 = dataDesign1["Design"]
+    if dataDesign2:
+      nameDesign2 = dataDesign2["Design"]
+    pageIndex = f'\n<p>\n{indent}<ac:structured-macro ac:macro-id="42343ded-5643-47ce-922c-5a9035a7c8f0" ac:name="toc" ac:schema-version="1"/>\n</p>\n<br/>'
+    # ========== setting up an hyperlink inside HTML macro to Expand/Collapse all the expandable content in the page ========== #
+    expandCollapseAll = f'\n<hr/>\n<br/>\n<ac:structured-macro ac:macro-id="8205dd91-49bd-4dd5-ba8d-6658983b8c46" ac:name="html" ac:schema-version="1">\n{indent}<ac:plain-text-body>\n{indent * 2}<![CDATA[<a href=\'javascript:(function()%7B%24(".expand-control").each(function()%7B %24(this).trigger("click")%3B%7D)%7D)()\'>Expand/Collapse All</a>]]>\n{indent}</ac:plain-text-body>\n</ac:structured-macro>'
+    # ========================================================================================================================= #
+    pageProperties = f'<ac:structured-macro ac:macro-id="513c3bae-58a1-44a5-83e4-dc091ddfa0a8" ac:name="details" ac:schema-version="1">\n{indent}<ac:rich-text-body>\n{indent * 2}<br/>\n{indent * 2}<table>\n{indent * 3}<colgroup><col/><col/><col/></colgroup>\n{indent * 3}<tbody>'
+    for matrix in dataDesign1["Properties"]:
+      pageProperties += f'\n{indent * 4}<tr>\n{indent * 5}<th>\n{indent * 6}<span style="color: rgb(23,43,77);">{matrix}</span>\n{indent * 5}</th>\n{indent * 5}<td>{dataDesign1["Properties"][matrix]}</td>'
+      pageProperties += f'\n{indent * 5}<td>{dataDesign2["Properties"][matrix]}</td>\n{indent * 4}</tr>' if dataDesign2 else f'\n{indent * 4}</tr>'
+    pageProperties += f'\n{indent * 3}</tbody>\n{indent * 2}</table>\n{indent * 2}<br/>\n{indent}</ac:rich-text-body>\n</ac:structured-macro>'
+    del dataDesign1["Properties"], dataDesign1[
+      "Design"]  # delete "Properties" dictionary & "Design" item after use as its structure doesn't matches with other data in dataDesign1 dictionary
+    if dataDesign2:
+      del dataDesign2["Properties"], dataDesign2[
+        "Design"]  # delete "Properties" dictionary & "Design" item after use as its structure doesn't matches with other data in dataDesign2 dictionary
+    pageData = ''
+    for headerLevel1 in dataDesign1:
+      # ======== setting up level 1 header as expandable header ======== #
+      pageData += f'\n<hr/>\n<br/>\n<ac:structured-macro ac:macro-id="c174ecce-f9ed-4784-8260-33c886a1562a" ac:name="expand" ac:schema-version="1">\n{indent}<ac:parameter ac:name="title">{headerLevel1}</ac:parameter>\n{indent}<ac:rich-text-body>\n{indent * 2}<h1>{headerLevel1}</h1>'
+      # ================================================================ #
+      for headerLevel2 in dataDesign1[headerLevel1]:
+        # ======== setting up level 2 heading as expandable heading ======== #
+        tableData = f'\n{indent * 2}<hr/>\n{indent * 2}<br/>\n{indent * 2}<ac:structured-macro ac:macro-id="c174ecce-f9ed-4784-8260-33c886a1562a" ac:name="expand" ac:schema-version="1">\n{indent * 3}<ac:parameter ac:name="title">{headerLevel2}</ac:parameter>\n{indent * 3}<ac:rich-text-body>\n{indent * 4}<h2>{headerLevel2}</h2>'
+        # ================================================================== #
+        if headerLevel2 == 'Check Timing':
+          newLine = '\n'  # writing escape characters in curly braces '{}' is invalid in f-string. ie. f'{"\n".join(tableHeader)}' is invalid in f-string
+          tableDesign1 = f'\n{indent * 12}<pre>{newLine.join(dataDesign1[headerLevel1][headerLevel2])}</pre>'  # "Check Timing" data is a list of string not a table
+          # ======== adding new comparison table (if comparativePageID != None) ======== #
+          if comparativePageID:
+            tableData += f'\n{indent * 4}<table class="relative-table wrapped" style="width: 100.0%;">\n{indent * 5}<colgroup>\n{indent * 6}<col style="width: 50%;"/>\n{indent * 6}<col style="width: 50%;"/>\n{indent * 5}</colgroup>\n{indent * 5}<tr>\n{indent * 6}<td>'
+          # ============================================================================ #
+          # ======== setting up the multiexcerpt macro to allow the reuse of this table in some other confluence page using multiexcerpt include macro ======== #
+          tableData += f'\n{indent * 7}<ac:structured-macro ac:macro-id="d0222fbb-cc8d-454c-9cbd-0b3797e5b079" ac:name="multiexcerpt" ac:schema-version="1">\n{indent * 8}<ac:parameter ac:name="MultiExcerptName">{headerLevel2}</ac:parameter>\n{indent * 8}<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>\n{indent * 8}<ac:rich-text-body>'
+          # =================================================================================================================================================== #
+          # ======== if design2 is there, then add the "Check Timing" data for both the designs in a comparation table ======== #
+          tableData += f'\n{indent * 9}<table class="relative-table wrapped" style="width: 100.0%;">\n{indent * 10}<colgroup>\n{indent * 11}<col style="width: 50%;"/>\n{indent * 11}<col style="width: 50%;"/>\n{indent * 10}</colgroup>\n{indent * 10}<tr>\n{indent * 11}<td>' + tableDesign1 + f'\n{indent * 11}</td>\n{indent * 11}<td>\n{indent * 12}<pre>{newLine.join(dataDesign2[headerLevel1][headerLevel2])}</pre>\n{indent * 11}</td>\n{indent * 10}</tr>\n{indent * 9}</table>' if dataDesign2 else tableDesign1
+          # =================================================================================================================== #
+          # ========== closing tags for multiexcerpt macro ========== #
+          tableData += f'\n{indent * 8}</ac:rich-text-body>\n{indent * 7}</ac:structured-macro>'
+          # ========================================================= #
+          # ======== delete the "Check Timing" contents so that it will not go in "for tableHeader in tableHeaders:" loop ======== #
+          dataDesign1[headerLevel1][headerLevel2] = {}
+          if dataDesign2: dataDesign2[headerLevel1][headerLevel2] = {}
+          # ====================================================================================================================== #
+          if comparativePageID:
+            tableData += f'\n{indent * 6}</td>'  # closing tags for comparison table data cell (if comparativePageID != None)
+            comparativePage = confluence.get_page_by_id(comparativePageID)
+            # ======== using multiexcerpt-include macro to show the table data from another design's analysis page ======== #
+            tableData += f'\n{indent * 6}<td>\n{indent * 7}<ac:structured-macro ac:macro-id="ddcd15ea-f989-4b1d-a62c-1a249266e207" ac:name="multiexcerpt-include" ac:schema-version="1">\n{indent * 8}<ac:parameter ac:name="SpaceWithExcerpt">\n{indent * 9}<ri:space ri:space-key=\"{comparativePage["space"]["key"]}\"/>\n{indent * 8}</ac:parameter>\n{indent * 8}<ac:parameter ac:name="MultiExcerptName">{headerLevel2}</ac:parameter>\n{indent * 8}<ac:parameter ac:name="addpanel">true</ac:parameter>\n{indent * 8}<ac:parameter ac:name="PageWithExcerpt">\n{indent * 9}<ac:link>\n{indent * 10}<ri:page ri:content-title=\"{comparativePage["title"]}\" ri:space-key=\"{comparativePage["space"]["key"]}\"/>\n{indent * 9}</ac:link>\n{indent * 8}</ac:parameter>\n{indent * 7}</ac:structured-macro>\n{indent * 6}</td>'
+            # ============================================================================================================= #
+            tableData += f'\n{indent * 5}</tr>\n{indent * 4}</table>'  # closing tags for comparison table
+        tableHeaders = list(dataDesign1[headerLevel1][headerLevel2].keys())
+        for tableHeader in tableHeaders:
+          if len(tableHeaders) > 1:
+            tableData += f'\n{indent * 11}<h3>{tableHeader}</h3>'
+          # ======== adding new comparison table (if comparativePageID != None) ======== #
+          if comparativePageID:
+            tableData += f'\n{indent * 4}<table class="relative-table wrapped" style="width: 100.0%;">\n{indent * 5}<colgroup>\n{indent * 6}<col style="width: 50%;"/>\n{indent * 6}<col style="width: 50%;"/>\n{indent * 5}</colgroup>\n{indent * 5}<tr>\n{indent * 6}<td>'
+          # ============================================================================ #
+          # ======== setting up the multiexcerpt macro to allow the reuse of this table in some other confluence page using multiexcerpt include macro ======== #
+          tableData += f'\n{indent * 7}<ac:structured-macro ac:macro-id="d0222fbb-cc8d-454c-9cbd-0b3797e5b079" ac:name="multiexcerpt" ac:schema-version="1">\n{indent * 8}<ac:parameter ac:name="MultiExcerptName">{headerLevel2} - {tableHeader}</ac:parameter>\n{indent * 8}<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>\n{indent * 8}<ac:rich-text-body>'
+          # =================================================================================================================================================== #
+          # ======== setting up advanced table macro so each table inside it has some common properties like sticky header row/column etc. ======== #
+          if tableHeader != "Overall Assessment Summary":
+            tableData += f'\n{indent * 9}<ac:structured-macro ac:macro-id="52891836-5b7a-4cf2-8624-9dfa6c6f8f44" ac:name="table-plus" ac:schema-version="1">\n{indent * 10}<ac:parameter ac:name="enableSorting">false</ac:parameter>\n{indent * 10}<ac:parameter ac:name="applyColStyleToCell">true</ac:parameter>\n{indent * 10}<ac:parameter ac:name="columnStyles">position: sticky; left: 0; top: auto;,,,,,,,,,,,,,,,,</ac:parameter>\n{indent * 10}<ac:parameter ac:name="atlassian-macro-output-type">INLINE</ac:parameter>\n{indent * 10}<ac:rich-text-body>'
+          # =================================================================================================================================================== #
+          # ======== adding new comparison table (if tableHeader == "Overall Assessment Summary") ======== #
+          if tableHeader == "Overall Assessment Summary" and dataDesign2:
+            tableData += f'\n{indent * 9}<table class="relative-table wrapped" style="width: 100.0%;">\n{indent * 10}<colgroup>\n{indent * 11}<col style="width: 50%;"/>\n{indent * 11}<col style="width: 50%;"/>\n{indent * 10}</colgroup>\n{indent * 10}<tr>\n{indent * 11}<td>'
+          # ============================================================================ #
+          if dataDesign2 and tableHeader != "Overall Assessment Summary":
+            tableData += dict2table(tableDesign1=dataDesign1[headerLevel1][headerLevel2][tableHeader],
+                                    nameDesign1=nameDesign1,
+                                    tableDesign2=dataDesign2[headerLevel1][headerLevel2][tableHeader],
+                                    nameDesign2=nameDesign2)
+          else:
+            tableData += dict2table(tableDesign1=dataDesign1[headerLevel1][headerLevel2][tableHeader],
+                                    nameDesign1=nameDesign1)
+            if dataDesign2 and tableHeader == "Overall Assessment Summary":
+              tableData += f'\n{indent * 11}</td>\n{indent * 11}<td>{dict2table(tableDesign1=dataDesign2[headerLevel1][headerLevel2][tableHeader], nameDesign1=nameDesign2)}\n{indent * 11}</td>\n{indent * 10}</tr>\n{indent * 9}</table>'
+          # ========== closing tags for advanced table macro + multiexcerpt macro ========== #
+          if tableHeader != "Overall Assessment Summary":
+            tableData += f'\n{indent * 10}</ac:rich-text-body>\n{indent * 9}</ac:structured-macro>'
+          tableData += f'\n{indent * 8}</ac:rich-text-body>\n{indent * 7}</ac:structured-macro>'
+
+        if numOfColumns > 1:
+          nextPatternCount = len(re.findall("[+][-]+", content[lnum + 1]))
+          lastPatternCount = len(re.findall("[+][-]+", content[lnum - 1]))
+          last2ndnumOfColumns = len(content[lnum - 2].split("|")[1:-1])
+          last3rdPatternCount = len(re.findall("[+][-]+", content[lnum - 3]))
+          if (nextPatternCount > 1) and (
+                  nextPatternCount == lastPatternCount) and not last3rdPatternCount and last2ndnumOfColumns <= 1:  # line contains column headings
+            columnHeadings = listOfData.copy()
+            for i in range(len(columnHeadings)):
+              if columnHeadings[i] == "": columnHeadings[i] = " "
+            tablesFromFile[tableHeading][
+              "colHeads"] = columnHeadings.copy()  # add columnHeadings to table of heading=tableHeading
+            # r tablesFromFile[tableHeading][columnHeadings[0]] = []
+          else:  # line contains row data
+            rowHeading = listOfData[0]
+            rowHeading = validateDictKey(key=rowHeading, dictionary=tablesFromFile[tableHeading])
+            """ same reason for rowHeading as of tableHeading """
+            tablesFromFile[tableHeading][rowHeading] = {}  # create new empty row of headinh=rowHeading
+            if not columnHeadings:
+              columnHeadings = ["Metric", "Value"]
+              tablesFromFile[tableHeading][
+                "colHeads"] = columnHeadings.copy()  # add columnHeadings to table of heading=tableHeading
+            for columnHeading, data in zip(columnHeadings[1:], listOfData[1:]):
+              tablesFromFile[tableHeading][rowHeading][columnHeading] = "-" if data == "" else data
+        elif re.search("\A[+][-]+", content[lnum - 1]) and numOfColumns <= 1:
+          rF = False  # clear readFlag at the end of each table
+          # print(lnum, line, rF)
+          if len(tablesFromFile[tableHeading].keys()) <= 1:  # only colHeads key is there, no data present
+            tablesFromFile[tableHeading] = {"Warning": line}
+          # print(json.dumps(tablesFromFile, indent = 2))
+        for tableHeading in requiredTables:
+          if tableHeading not in tablesFromFile:
+            tablesFromFile[tableHeading] = {}
+        return tablesFromFile
+
+        def getTablesFromFile(filename, requiredTables="all"):
+          """
+            requiredTables contain the list of required table headings for which user wants table data
+            user must give table heading as per following rules -
+              1. Table heading must be similar to heading in report file
+                 Ex: User must give table heading "Netlist Logic" for following table -
+
+                     1. Netlist Logic
+                     ----------------
+
+                     +-------------------------+--------+-------+------------+-----------+-------+
+                     |        Site Type        |  Used  | Fixed | Prohibited | Available | Util% |
+                     +-------------------------+--------+-------+------------+-----------+-------+
+                     | Registers               | 298261 |     0 |          0 |   3440896 |  8.67 |
+                     |   Register as Flip Flop | 298261 |     0 |          0 |   3440896 |  8.67 |
+                     |   Register as Latch     |      0 |     0 |          0 |   3440896 |  0.00 |
+                     | CLB LUTs                | 418730 |     1 |          0 |   1720448 | 24.34 |
+                     |   LUT as Logic          | 418730 |     1 |          0 |   1720448 | 24.34 |
+                     |   LUT as Memory         |      0 |     0 |          0 |    860224 |  0.00 |
+                     | LOOKAHEAD8              |   1280 |     0 |          0 |    215056 |  0.60 |
+                     +-------------------------+--------+-------+------------+-----------+-------+
+
+              2. if multiple tables have same table heading in report file then table heading will be
+                 "<table heading>" if user want data for first occurence of table of heading=<table heading>
+                 in file, else "<table heading> #<n>" where number 'n' is the n th occurence of table of
+                 heading=<table heading>. So, 'n' will be in {2,3,4,...}
+          """
+          if not os.path.exists(filename):  # check whether filename exist or not
+            print("Warning: File %s doesn't exists !!!" % (filename))
+            return {}
+          else:
+            with open(filename, "r") as da:
+              content = da.readlines()
+              da.close()
+            return getTablesFromContent(content, requiredTables)
+
+        # return a nested dictionary containing all the tables data required in design analysis confluence page
+        def getAllData(directory):
+          tables = {}
+          requiredJSON = f'{os.path.dirname(__file__)}/requiredFiles.json'
+          if os.path.exists(requiredJSON):
+            requiredFiles = getJSONdata(requiredJSON)
+          else:
+            sys.exit(
+              f'Error: Can\'t find {os.path.dirname(__file__)}/requiredFiles.json file. You must keep designAnalysis.py, interaction.py & requiredFiles.json files in {os.path.dirname(__file__)} directory.')
+          filesNotFound = []
+          vivadoLog = directory + "/vivado.log"
+          titanLog = directory + "/titan.log"
+          logFile = vivadoLog if os.path.exists(vivadoLog) else titanLog
+          if not os.path.exists(logFile):
+            sys.exit("Error: Neither %s nor %s file exist" % (vivadoLog, titanLog))
+          for filename in requiredFiles:
+            for headerLevel1 in requiredFiles[filename]["requiredTables"]:
+              tables[headerLevel1] = {}
+          for filename in requiredFiles:
+            for headerLevel1 in requiredFiles[filename]["requiredTables"]:
+              for headerLevel2 in requiredFiles[filename]["requiredTables"][headerLevel1]:
+                tables[headerLevel1][headerLevel2] = {}
+                for tableHeader in requiredFiles[filename]["requiredTables"][headerLevel1][headerLevel2]:
+                  tables[headerLevel1][headerLevel2][tableHeader] = {}
+          try:
+            cmd = f'grep "# Start of session at:" {logFile}'
+            cmdOutput = (os.popen(cmd).read()).strip()
+            runDate = datetime.datetime.strptime(cmdOutput, '# Start of session at: %a %b %d %H:%M:%S %Y')
+            runDate = runDate.strftime('%b %d %Y')
+          except:
+            runDate = ' '
+          try:
+            cmd = f'grep "Info: Part" {logFile}'
+            cmdOutput = (os.popen(cmd).read()).strip()
+            devicePart = (cmdOutput.split(' '))[-1]
+          except:
+            devicePart = ' '
+          tables["Properties"] = {
+            "Date of the Run": runDate,
+            "Vivado Build": " ",
+            "Device Part": devicePart,
+            "Analyzed by": " ",
+            "Suite Names": " ",
+            "Ratio/Status in SPRITE": " ",
+            "Metrics Analyzed": " ",
+            "Analysis Summary": " ",
+            "Jira links": " "
+          }
+          cmd = f'sed -n "/Design State : Routed/,/report_utilization:/p" {logFile}'  # get a portion of *.log file from line "Design State : Routed" to "report_utilization:"
+          cmdOutput = (os.popen(cmd).read()).strip()
+          if cmdOutput == '':
+            print(f'Warning: Design hasn\'t finished routing hence no utilization data can be captured.')
+          content = cmdOutput.split("\n")
+          tablesFromFile = getTablesFromContent(content)
+          resourceUtilization = getResourceUtilization(tablesFromFile)
+          tables["Top Level Metrics"]["Utilization"]["Resource Utilization"] = resourceUtilization.copy()
+          if "CLOCK" in tablesFromFile:
+            tables["Top Level Metrics"]["Utilization"]["Clock Utilization"] = tablesFromFile["CLOCK"].copy()
+          tables = updateTables(tables, requiredFiles["logFile"]["requiredTables"], tablesFromFile)
+          # ==== take each filename from requiredFiles dictionary & check whether file exist or not, if not exist then print hint message otherwise read tables from file ==== #
+          for filename in (list(requiredFiles.keys()))[1:-1]:  # don't consider logFile & userTask
+            filePath = f'{directory}/{filename}'
+            if not os.path.exists(filePath):
+              filesNotFound.append(filename)
+            else:
+              tablesFromFile = getTablesFromFile(filePath)
+              tables = updateTables(tables, requiredFiles[filename]["requiredTables"], tablesFromFile)
+          if len(filesNotFound):
+            print(
+              f'Following reports are needed at {directory} to generated page with all the data -\n{", ".join(filesNotFound)}\nPlease run the following commands in Vivado and rerun the python script again -\n-- Vivado reporting commands --')
+            for filename in filesNotFound:
+              print(requiredFiles[filename]["cmd"])
+          # ================================================================================================================================================================== #
+          checkTimingTable = getCheckTiming(f'{directory}/post_route_timing_summary.txt')
+          tables["Top Level Metrics"]["Check Timing"] = checkTimingTable.copy()
+          drsSummary = getDesignRouteStatus(f'{directory}/route_status_summary.rpt')
+          tables["Assessment"]["Design Route Status"]["DRS Summary"] = drsSummary.copy()
+          return tables, filesNotFound
+
+        # write extracted data to *.json file
+        def writeDataToJSON(jsonFile, data):
+          with open(jsonFile, "w") as fr:
+            # json.dump(data, fr)
+            fr.write(json.dumps(data, indent=2))
+            fr.write("\n")
+            fr.close()
+          print("Created JSON file  %s" % jsonFile)
+
+        # read data from *.json file= creates an empty json file and only loads the headings with empty contents
+        def getJSONdata(jsonFile):
+          if not os.path.exists(jsonFile):
+            sys.exit("File %s doesn't exists" % jsonFile)
+          else:
+            with open(jsonFile, "r") as fr:
+              data = json.load(fr)
+          return data
+
+        # write data into file
+        def writeFile(filePath, data):
+          with open(filePath, "w") as fw:
+            fw.write(data)
+
+        # return a list of all the filenames (not filepaths) with specified extension in specified directory
+        def listDir(directory='./', extension=''):
+          files = []
+          for filename in os.listdir(directory):
+            if filename.endswith(extension):
+              files.append(filename)
+          return files
